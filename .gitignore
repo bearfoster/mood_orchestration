@@ -3,6 +3,9 @@
 # Python virtual environment for this service
 venv_orchestration/
 
+# Environment variables
+.env
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.pyc

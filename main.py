@@ -1,12 +1,15 @@
 # orchestration_layer/main.py
 
+from dotenv import load_dotenv # ADDED
+load_dotenv() # ADDED: Load environment variables from .env file
+
 import os
 import requests
 import json
 import time
-import asyncio # Required for async operations and sleep
+import asyncio
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Literal, Optional, Union
 
@@ -16,14 +19,14 @@ from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage
 from langchain_openai import AzureChatOpenAI
-from langchain_core.output_parsers import JsonOutputParser # For parsing LLM's structured output
+from langchain_core.output_parsers import JsonOutputParser
 
 
 # --- FastAPI Application Initialization ---
 app = FastAPI(
     title="Orchestration Layer API",
     description="API for orchestrating weather-to-mood-to-music workflow with natural language weather input.",
-    version="0.4.0" # Updated version to reflect natural language input
+    version="0.4.0"
 )
 
 # --- Azure OpenAI LLM Initialization ---
@@ -33,11 +36,9 @@ try:
         azure_deployment=os.getenv("AZURE_OPENAI_CHAT_MODEL_NAME", "gpt-4"),
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        temperature=0.0, # Keep temperature low for reliable tool calling and extraction
+        temperature=0.0,
     )
-    # Also initialize a separate LLM for the weather parameter extraction tool if needed,
-    # or reuse the main LLM. Reusing is simpler for now.
-    weather_extractor_llm = llm # Using the same LLM instance for extraction
+    weather_extractor_llm = llm
 except Exception as e:
     print(f"Error initializing Azure OpenAI LLM in Orchestration Layer: {e}")
     print("Please ensure AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, and AZURE_OPENAI_CHAT_MODEL_NAME are set as environment variables.")
@@ -45,7 +46,7 @@ except Exception as e:
     weather_extractor_llm = None
 
 
-# --- MCPClient for interacting with services (reused from previous code) ---
+# --- MCPClient for interacting with services ---
 
 class MCPClient:
     def __init__(self, mood_analysis_url: str, music_generation_url: str):
@@ -74,7 +75,7 @@ class MCPClient:
     async def invoke_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
         tool_info = self.tools_cache.get(tool_name)
         if not tool_info:
-            await self.discover_all_tools() # Try to discover if not in cache
+            await self.discover_all_tools()
             tool_info = self.tools_cache.get(tool_name)
             if not tool_info:
                  raise ValueError(f"Tool '{tool_name}' not found after discovery. Is the service running?")
@@ -84,9 +85,8 @@ class MCPClient:
             service_url = self.mood_analysis_url
         elif service_id == "music-generation-agent-2":
             service_url = self.music_generation_url
-        # If it's a locally defined tool (like 'extract_weather_params'), it won't have a service_id
-        # This part of the MCPClient only handles external MCP services.
-        # Local tools are handled directly by the agent_executor.
+        else:
+            raise ValueError(f"Unknown service_id '{service_id}' for tool '{tool_name}'")
 
         invocation_url = f"{service_url}/mcp/tool/{tool_name}"
         headers = {"Content-Type": "application/json"}
@@ -100,9 +100,9 @@ class MCPClient:
             return result
         except requests.exceptions.RequestException as e:
             print(f"Error invoking tool '{tool_name}': {e}")
-            raise HTTPException(status_code=500, detail=f"Error invoking tool '{tool_name}': {e}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error invoking tool '{tool_name}': {e}")
 
-# Instantiate the MCPClient with the URLs of your services
+
 mcp_client = MCPClient(
     mood_analysis_url="http://127.0.0.1:8001",
     music_generation_url="http://127.0.0.1:8002"
@@ -143,7 +143,6 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
     try:
         llm_response = await weather_extraction_chain.invoke({"query": natural_language_query})
         
-        # Validate the LLM's response against the Pydantic model
         extracted_params = ExtractedWeatherParams(
             temperature_celsius=llm_response.get("temperature_celsius"),
             conditions=llm_response.get("conditions")
@@ -152,12 +151,11 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
         return extracted_params
     except Exception as e:
         print(f"Error during LLM weather parameter extraction: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to extract weather parameters: {e}. Ensure LLM is configured and responds with valid JSON.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to extract weather parameters: {e}. Ensure LLM is configured and responds with valid JSON.")
 
 
 # --- Define LangChain Tools ---
 
-# Function to create a LangChain Tool from a discovered MCP tool (reused)
 def create_langchain_tool_from_mcp(mcp_tool_name: str, mcp_client_instance: MCPClient) -> Tool:
     tool_info = mcp_client_instance.tools_cache.get(mcp_tool_name)
     if not tool_info:
@@ -194,10 +192,6 @@ agent_executor_instance: Optional[AgentExecutor] = None
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Initializes the LangChain agent executor on FastAPI application startup.
-    This ensures tools are discovered and the agent is ready before handling requests.
-    """
     global agent_executor_instance
     if llm is None:
         print("LLM not initialized. Cannot create agent executor.")
@@ -205,11 +199,9 @@ async def startup_event():
 
     print("Orchestration Layer: Discovering tools and creating agent executor...")
     
-    # Discover external MCP tools
     await mcp_client.discover_all_tools()
     
     langchain_tools = []
-    # Add the newly defined weather extraction tool
     langchain_tools.append(
         Tool(
             name="extract_weather_params",
@@ -217,18 +209,16 @@ async def startup_event():
                         "Input: natural_language_query (string). "
                         "Output: JSON with temperature_celsius (float) and conditions (string).",
             func=_extract_weather_params_tool,
-            args_schema=BaseModel # Using BaseModel for dynamic tool call, LLM will fill
+            args_schema=BaseModel
         )
     )
 
-    # Iterate through the cached external MCP tools and create LangChain Tool instances
     for tool_name in mcp_client.tools_cache.keys():
         try:
             langchain_tools.append(create_langchain_tool_from_mcp(tool_name, mcp_client))
         except Exception as e:
             print(f"Error creating LangChain tool '{tool_name}': {e}. Skipping this tool.")
 
-    # Define the prompt template for the LLM
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -251,10 +241,8 @@ async def startup_event():
         ]
     )
 
-    # Create the agent
     agent = create_tool_calling_agent(llm, langchain_tools, prompt)
 
-    # Create the agent executor
     agent_executor_instance = AgentExecutor(agent=agent, tools=langchain_tools, verbose=True)
     print("Orchestration Layer: Agent Executor initialized.")
 
@@ -272,12 +260,8 @@ class MusicResponse(BaseModel):
 
 @app.post("/orchestrate/weather-to-music", response_model=MusicResponse)
 async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicRequest) -> MusicResponse:
-    """
-    Orchestrates the weather-to-mood-to-music workflow for a given natural language weather input.
-    Returns the generated music URL or an error.
-    """
     if agent_executor_instance is None:
-        raise HTTPException(status_code=503, detail="Orchestration service not ready. LLM or Agent Executor not initialized.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Orchestration service not ready. LLM or Agent Executor not initialized.")
 
     initial_chat_history = []
     inferred_mood = None
@@ -288,8 +272,6 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
 
     try:
         # Step 1: Use LLM to extract temperature and conditions from natural language query
-        # We explicitly call the 'extract_weather_params' tool here via the agent,
-        # guiding the LLM to perform this specific task first.
         weather_extract_input = request_data.natural_language_query
         print(f"\nAPI Call: Extracting weather parameters for: '{weather_extract_input}'")
         extract_response = await agent_executor_instance.invoke(
@@ -299,7 +281,7 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
 
         try:
             extracted_data = extract_response.get('output')
-            if isinstance(extracted_data, str): # If LLM outputs raw string, try to parse
+            if isinstance(extracted_data, str):
                 extracted_data = json.loads(extracted_data)
 
             extracted_temp = extracted_data.get("temperature_celsius")
@@ -312,7 +294,6 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
             print(error_message)
             return MusicResponse(error=error_message)
 
-        # Update chat history for next steps
         initial_chat_history.append(HumanMessage(content=weather_extract_input))
         initial_chat_history.append(HumanMessage(content=json.dumps(extracted_data)))
 
@@ -338,7 +319,6 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
             print(error_message)
             return MusicResponse(error=error_message)
 
-        # Update chat history
         initial_chat_history.append(HumanMessage(content=mood_analysis_input_for_llm))
         initial_chat_history.append(HumanMessage(content=json.dumps(mood_data)))
 
@@ -364,14 +344,13 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
             print(error_message)
             return MusicResponse(error=error_message, mood=inferred_mood)
 
-        # Update chat history
         initial_chat_history.append(HumanMessage(content=music_init_input))
         initial_chat_history.append(HumanMessage(content=json.dumps(init_data)))
 
         # Step 4: Poll for Music Generation Status
         print(f"\nAPI Call: Polling for music generation status with Task ID: {task_id}")
-        for _ in range(15): # Max 15 retries (30 seconds total)
-            await asyncio.sleep(2) # Wait 2 seconds before polling
+        for _ in range(15):
+            await asyncio.sleep(2)
             status_check_input = f"Check music status for task_id: {task_id}"
             status_response = await agent_executor_instance.invoke(
                 {"input": status_check_input, "chat_history": initial_chat_history}
@@ -385,7 +364,6 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
 
                 current_status = status_data.get("status")
                 
-                # Update chat history
                 initial_chat_history.append(HumanMessage(content=status_check_input))
                 initial_chat_history.append(HumanMessage(content=json.dumps(status_data)))
 
@@ -422,14 +400,5 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
     except Exception as e:
         error_message = f"An unhandled error occurred during orchestration: {e}"
         print(f"Unhandled error: {e}")
-        raise HTTPException(status_code=500, detail=error_message)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_message)
 
-# To run this service:
-# 1. Save the code as 'main.py' inside the 'orchestration_layer' directory.
-# 2. Make sure you have all dependencies installed:
-#    pip install fastapi uvicorn pydantic requests langchain-core langchain-community langchain-openai
-# 3. Set your Azure OpenAI environment variables for the LLM.
-# 4. Ensure mood_analysis_service (port 8001) and music_generation_service (port 8002) are running.
-# 5. Navigate to the 'orchestration_layer' directory in your terminal.
-# 6. Run the command: uvicorn main:app --reload --port 8003
-# This will start the API endpoint on http://127.0.0.1:8003
