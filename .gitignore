@@ -1,0 +1,18 @@
+# orchestration_layer/.gitignore
+
+# Python virtual environment for this service
+venv_orchestration/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.so
+
+# Logs and databases (if any are generated specific to this service)
+*.log
+*.db
+
+# Editor/IDE files (if any are generated locally within this folder)
+.idea/
+.vscode/
