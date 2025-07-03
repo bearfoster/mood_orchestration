@@ -262,143 +262,33 @@ class MusicResponse(BaseModel):
 async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicRequest) -> MusicResponse:
     if agent_executor_instance is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Orchestration service not ready. LLM or Agent Executor not initialized.")
-
-    initial_chat_history = []
-    inferred_mood = None
-    music_url = None
-    error_message = None
-    extracted_temp = None
-    extracted_conditions = None
-
+ 
+    # The agent is designed to handle the full orchestration from a single input.
+    # The detailed system prompt guides it through the required steps:
+    # 1. Extract weather
+    # 2. Analyze mood
+    # 3. Initiate music generation
+    # 4. Poll for status
+    # This simplifies the endpoint logic significantly.
+    
+    # We combine the user's query and the desired duration into a single input for the agent.
+    full_input = (
+        f"User weather query: '{request_data.natural_language_query}'. "
+        f"Desired music duration: {request_data.duration_seconds} seconds."
+    )
+    
+    print(f"\nAPI Call: Invoking agent for full orchestration with input: '{full_input}'")
+    
     try:
-        # Step 1: Use LLM to extract temperature and conditions from natural language query
-        weather_extract_input = request_data.natural_language_query
-        print(f"\nAPI Call: Extracting weather parameters for: '{weather_extract_input}'")
-        extract_response = await agent_executor_instance.invoke(
-            {"input": weather_extract_input, "chat_history": initial_chat_history}
+        # A single invocation triggers the entire agent-driven workflow.
+        response = await agent_executor_instance.invoke(
+            {"input": full_input, "chat_history": []}
         )
-        print(f"Weather Extraction Response: {extract_response.get('output')}")
-
-        try:
-            extracted_data = extract_response.get('output')
-            if isinstance(extracted_data, str):
-                extracted_data = json.loads(extracted_data)
-
-            extracted_temp = extracted_data.get("temperature_celsius")
-            extracted_conditions = extracted_data.get("conditions")
-
-            if extracted_temp is None or extracted_conditions is None:
-                raise ValueError("LLM did not return complete weather parameters.")
-        except (json.JSONDecodeError, AttributeError, ValueError) as e:
-            error_message = f"Failed to extract weather parameters from LLM: {e}. Raw response: {extract_response.get('output')}"
-            print(error_message)
-            return MusicResponse(error=error_message)
-
-        initial_chat_history.append(HumanMessage(content=weather_extract_input))
-        initial_chat_history.append(HumanMessage(content=json.dumps(extracted_data)))
-
-
-        # Step 2: Analyze Mood from Extracted Weather
-        mood_analysis_input_for_llm = f"Analyze mood for temperature {extracted_temp}°C and conditions '{extracted_conditions}'."
-        print(f"\nAPI Call: Initiating mood analysis for: {mood_analysis_input_for_llm}")
-        mood_response = await agent_executor_instance.invoke(
-            {"input": mood_analysis_input_for_llm, "chat_history": initial_chat_history}
-        )
-        print(f"Mood Analysis Response: {mood_response.get('output')}")
-
-        try:
-            mood_data = mood_response.get('output')
-            if isinstance(mood_data, str):
-                mood_data = json.loads(mood_data)
-
-            inferred_mood = mood_data.get("mood")
-            if not inferred_mood:
-                raise ValueError("LLM did not return a valid mood after analysis.")
-        except (json.JSONDecodeError, AttributeError, ValueError) as e:
-            error_message = f"Failed to parse mood analysis response: {e}. Raw response: {mood_response.get('output')}"
-            print(error_message)
-            return MusicResponse(error=error_message)
-
-        initial_chat_history.append(HumanMessage(content=mood_analysis_input_for_llm))
-        initial_chat_history.append(HumanMessage(content=json.dumps(mood_data)))
-
-
-        # Step 3: Initiate Music Generation
-        music_init_input = f"Generate music for mood '{inferred_mood}' with duration {request_data.duration_seconds} seconds."
-        print(f"\nAPI Call: Initiating music generation for: {music_init_input}")
-        music_init_response = await agent_executor_instance.invoke(
-            {"input": music_init_input, "chat_history": initial_chat_history}
-        )
-        print(f"Music Init Response: {music_init_response.get('output')}")
-
-        try:
-            init_data = music_init_response.get('output')
-            if isinstance(init_data, str):
-                init_data = json.loads(init_data)
-            
-            task_id = init_data.get("task_id")
-            if not task_id:
-                raise ValueError("LLM did not return a task_id for music generation.")
-        except (json.JSONDecodeError, AttributeError, ValueError) as e:
-            error_message = f"Failed to parse music initiation response: {e}. Raw response: {music_init_response.get('output')}"
-            print(error_message)
-            return MusicResponse(error=error_message, mood=inferred_mood)
-
-        initial_chat_history.append(HumanMessage(content=music_init_input))
-        initial_chat_history.append(HumanMessage(content=json.dumps(init_data)))
-
-        # Step 4: Poll for Music Generation Status
-        print(f"\nAPI Call: Polling for music generation status with Task ID: {task_id}")
-        for _ in range(15):
-            await asyncio.sleep(2)
-            status_check_input = f"Check music status for task_id: {task_id}"
-            status_response = await agent_executor_instance.invoke(
-                {"input": status_check_input, "chat_history": initial_chat_history}
-            )
-            print(f"Status Check Response: {status_response.get('output')}")
-
-            try:
-                status_data = status_response.get('output')
-                if isinstance(status_data, str):
-                    status_data = json.loads(status_data)
-
-                current_status = status_data.get("status")
-                
-                initial_chat_history.append(HumanMessage(content=status_check_input))
-                initial_chat_history.append(HumanMessage(content=json.dumps(status_data)))
-
-                if current_status == "completed":
-                    music_url = status_data.get("music_url")
-                    if music_url:
-                        print(f"Music generation completed. URL: {music_url}")
-                        return MusicResponse(music_url=music_url, mood=inferred_mood)
-                    else:
-                        error_message = "Music generation completed but no URL returned."
-                        break
-                elif current_status == "failed":
-                    error_message = status_data.get("error", "Music generation failed for unknown reason.")
-                    print(f"Music generation failed: {error_message}")
-                    break
-                elif current_status == "processing":
-                    print("Music still processing...")
-                    continue
-                else:
-                    error_message = f"Unexpected status received: {current_status}"
-                    break
-
-            except (json.JSONDecodeError, AttributeError, ValueError) as e:
-                error_message = f"Failed to parse status response: {e}. Raw response: {status_response.get('output')}"
-                print(error_message)
-                break
-        
-        if not music_url:
-            if not error_message:
-                error_message = "Music generation timed out or could not complete within allowed retries."
-            print(f"Orchestration timed out/failed: {error_message}")
-            return MusicResponse(error=error_message, mood=inferred_mood)
-
+        print(f"Agent final output: {response.get('output')}")
+        # The agent's final output should be the JSON string we requested in the prompt.
+        final_data = json.loads(response.get('output'))
+        return MusicResponse(**final_data)
     except Exception as e:
-        error_message = f"An unhandled error occurred during orchestration: {e}"
-        print(f"Unhandled error: {e}")
+        error_message = f"An unhandled error occurred during agent orchestration: {e}"
+        print(error_message)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=error_message)
-
