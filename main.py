@@ -115,6 +115,10 @@ class ExtractedWeatherParams(BaseModel):
     temperature_celsius: float = Field(..., description="The inferred temperature in Celsius.")
     conditions: str = Field(..., description="A concise descriptive string of the inferred weather conditions.")
 
+class ExtractWeatherParamsInput(BaseModel):
+    """Input for the extract_weather_params tool."""
+    natural_language_query: str = Field(..., description="The user's natural language query about the weather.")
+
 async def _extract_weather_params_tool(natural_language_query: str) -> ExtractedWeatherParams:
     """
     Uses an LLM to extract temperature and conditions from a natural language query about weather.
@@ -209,7 +213,7 @@ async def startup_event():
                         "Input: natural_language_query (string). "
                         "Output: JSON with temperature_celsius (float) and conditions (string).",
             func=_extract_weather_params_tool,
-            args_schema=BaseModel
+            args_schema=ExtractWeatherParamsInput
         )
     )
 
