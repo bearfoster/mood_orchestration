@@ -10,6 +10,7 @@ import time
 import asyncio
 
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Literal, Optional, Union
 
@@ -27,6 +28,19 @@ app = FastAPI(
     title="Orchestration Layer API",
     description="API for orchestrating weather-to-mood-to-music workflow with natural language weather input.",
     version="0.4.0"
+)
+
+# --- CORS Configuration ---
+# This is necessary to allow a frontend application (like a React/Vue/Angular app)
+# running on a different origin (e.g., http://localhost:3000) to communicate
+# with this backend API. The browser sends a "preflight" OPTIONS request to check
+# permissions before sending the actual POST/GET request, which this middleware handles.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For development. In production, restrict this to your frontend's actual domain.
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods.
+    allow_headers=["*"],  # Allows all headers.
 )
 
 # --- Azure OpenAI LLM Initialization ---
