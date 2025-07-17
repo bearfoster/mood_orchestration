@@ -217,7 +217,8 @@ def create_langchain_tool_from_mcp(mcp_tool_name: str, mcp_client_instance: MCPC
     return Tool(
         name=mcp_tool_name,
         description=tool_info.get("description", mcp_tool_name),
-        func=_tool_func,
+        func=lambda *args, **kwargs: None,  # Dummy sync function
+        async_func=_tool_func,  # Use async_func for async tools
         args_schema=DynamicInputModel
     )
 
@@ -244,7 +245,8 @@ async def startup_event():
             description="Extracts temperature and conditions from a natural language weather query. "
                         "Input: natural_language_query (string). "
                         "Output: JSON with temperature_celsius (float) and conditions (string).",
-            func=_extract_weather_params_tool,
+            func=lambda *args, **kwargs: None,  # Dummy sync function
+            async_func=_extract_weather_params_tool,  # Use async_func for async tools
             args_schema=ExtractWeatherParamsInput
         )
     )
