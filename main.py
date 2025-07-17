@@ -69,14 +69,14 @@ class MCPClient:
         self.tools_cache: Dict[str, Dict[str, Any]] = {}
 
     async def _discover_tools(self, service_url: str) -> Dict[str, Any]:
-        discovery_url = f"{service_url}/mcp/tools"
+        discovery_url = f"{service_url}/tools"
         try:
             response = requests.get(discovery_url)
             response.raise_for_status()
             tools_data = response.json()
-            for tool_name, tool_info in tools_data.items():
-                self.tools_cache[tool_name] = tool_info
-            print(f"Discovered tools from {service_url}: {list(tools_data.keys())}")
+            for tool in tools_data:
+                self.tools_cache[tool["name"]] = tool
+            print(f"Discovered tools from {service_url}: {[tool['name'] for tool in tools_data]}")
             return tools_data
         except requests.exceptions.RequestException as e:
             print(f"Error discovering tools from {service_url}: {e}")
@@ -92,22 +92,22 @@ class MCPClient:
             await self.discover_all_tools()
             tool_info = self.tools_cache.get(tool_name)
             if not tool_info:
-                 raise ValueError(f"Tool '{tool_name}' not found after discovery. Is the service running?")
+                raise ValueError(f"Tool '{tool_name}' not found after discovery. Is the service running?")
 
-        service_id = tool_info.get("service_id")
-        if service_id == "mood-analysis-agent-1":
+        # Determine which service to call based on tool name
+        if tool_name in ["analyze_weather_mood"]:
             service_url = self.mood_analysis_url
-        elif service_id == "music-generation-agent-2":
+            endpoint = f"{service_url}/analyze_weather_mood/"
+        elif tool_name in ["initiate_music_generation", "get_music_generation_status"]:
             service_url = self.music_generation_url
+            endpoint = f"{service_url}/{tool_name}/"
         else:
-            raise ValueError(f"Unknown service_id '{service_id}' for tool '{tool_name}'")
+            raise ValueError(f"Unknown tool name '{tool_name}' for invocation.")
 
-        invocation_url = f"{service_url}/mcp/tool/{tool_name}"
         headers = {"Content-Type": "application/json"}
-
-        print(f"Invoking tool: {tool_name} with args: {kwargs} at {invocation_url}")
+        print(f"Invoking tool: {tool_name} with args: {kwargs} at {endpoint}")
         try:
-            response = requests.post(invocation_url, headers=headers, json=kwargs)
+            response = requests.post(endpoint, headers=headers, json=kwargs)
             response.raise_for_status()
             result = response.json()
             print(f"Tool '{tool_name}' invocation successful. Result: {result}")
@@ -137,7 +137,9 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
     """
     Uses an LLM to extract temperature and conditions from a natural language query about weather.
     """
+    print(f"[DEBUG] _extract_weather_params_tool called with natural_language_query: {natural_language_query}")
     if weather_extractor_llm is None:
+        print("[ERROR] Weather extractor LLM not initialized.")
         raise HTTPException(status_code=500, detail="Weather extractor LLM not initialized.")
 
     weather_extraction_prompt = ChatPromptTemplate.from_messages(
@@ -150,25 +152,29 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
                 "If temperature or conditions are not explicitly mentioned but implied, try to infer reasonable defaults "
                 "or state 'unknown' if no reasonable inference can be made. "
                 "Your response must be ONLY a JSON object with 'temperature_celsius' (float) and 'conditions' (string) keys. "
-                "Example: {{\"temperature_celsius\": 22.5, \"conditions\": \"sunny with a light breeze\"}}"
+                "Example: {{{{\"temperature_celsius\": 22.5, \"conditions\": \"sunny with a light breeze\"}}}}"
             ),
             ("human", "{query}")
         ]
     )
 
+    print("[DEBUG] Created weather_extraction_prompt.")
     weather_extraction_chain = weather_extraction_prompt | weather_extractor_llm | JsonOutputParser()
+    print("[DEBUG] Created weather_extraction_chain.")
 
     try:
-        llm_response = await weather_extraction_chain.invoke({"query": natural_language_query})
+        print(f"[DEBUG] Invoking weather_extraction_chain with query: {natural_language_query}")
+        llm_response = await weather_extraction_chain.ainvoke({"query": natural_language_query})
+        print(f"[DEBUG] LLM response from weather_extraction_chain: {llm_response}")
         
         extracted_params = ExtractedWeatherParams(
             temperature_celsius=llm_response.get("temperature_celsius"),
             conditions=llm_response.get("conditions")
         )
-        print(f"Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
+        print(f"[DEBUG] Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
         return extracted_params
     except Exception as e:
-        print(f"Error during LLM weather parameter extraction: {e}")
+        print(f"[ERROR] Exception during LLM weather parameter extraction: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to extract weather parameters: {e}. Ensure LLM is configured and responds with valid JSON.")
 
 
@@ -179,26 +185,38 @@ def create_langchain_tool_from_mcp(mcp_tool_name: str, mcp_client_instance: MCPC
     if not tool_info:
         raise ValueError(f"MCP tool '{mcp_tool_name}' not found in client cache for LangChain tool creation.")
 
-    input_schema_dict = tool_info["input_schema"]
-    fields = {}
-    for k, v in input_schema_dict["properties"].items():
-        if "enum" in v and v["type"] == "STRING":
-            fields[k] = (Literal[tuple(v["enum"])], Field(..., description=v.get("description", "")))
-        elif v["type"] == "NUMBER":
-            fields[k] = (float, Field(..., description=v.get("description", "")))
-        elif v["type"] == "INTEGER":
-            fields[k] = (int, Field(..., description=v.get("description", "")))
+    # Accept both 'input_schema' and 'parameters' for input schema
+    input_schema_dict = tool_info.get("input_schema")
+    if not input_schema_dict:
+        # Fallback to 'parameters' if 'input_schema' is missing
+        input_schema_dict = {"properties": tool_info.get("parameters", {})}
+        if not input_schema_dict["properties"]:
+            raise ValueError(f"Tool '{mcp_tool_name}' missing 'input_schema' and 'parameters' in discovery response: {tool_info}")
+    annotations = {}
+    class_fields = {}
+    for k, v in input_schema_dict.get("properties", {}).items():
+        t = v.get("type", v.get("type_", "string")).lower()
+        if "enum" in v and t == "string":
+            annotations[k] = Literal[tuple(v["enum"])]
+            class_fields[k] = Field(..., description=v.get("description", ""))
+        elif t == "number":
+            annotations[k] = float
+            class_fields[k] = Field(..., description=v.get("description", ""))
+        elif t == "integer":
+            annotations[k] = int
+            class_fields[k] = Field(..., description=v.get("description", ""))
         else:
-            fields[k] = (str, Field(..., description=v.get("description", "")))
-
-    DynamicInputModel = type(f"{mcp_tool_name.capitalize()}Input", (BaseModel,), fields)
+            annotations[k] = str
+            class_fields[k] = Field(..., description=v.get("description", ""))
+    class_fields['__annotations__'] = annotations
+    DynamicInputModel = type(f"{mcp_tool_name.capitalize()}Input", (BaseModel,), class_fields)
 
     async def _tool_func(**kwargs: Any) -> Dict[str, Any]:
         return await mcp_client_instance.invoke_tool(mcp_tool_name, **kwargs)
 
     return Tool(
         name=mcp_tool_name,
-        description=tool_info["description"],
+        description=tool_info.get("description", mcp_tool_name),
         func=_tool_func,
         args_schema=DynamicInputModel
     )
@@ -244,14 +262,14 @@ async def startup_event():
                 "You are an AI assistant that orchestrates weather-to-mood-to-music. "
                 "Your primary goal is to provide a music URL based on user's weather inquiry. "
                 "You have access to the following tools:\n\n"
-                "{tools}\n\n"
+                "{{langchain_tools}}\n\n"
                 "First, use 'extract_weather_params' to get structured temperature and conditions from the user's natural language input. "
                 "Then, use 'analyze_weather_mood' with the extracted weather data to determine the mood. "
                 "Next, use 'initiate_music_generation' with the inferred mood and a suitable duration (e.g., 90 seconds) to start music creation. "
                 "If 'initiate_music_generation' returns a task_id, periodically check its status using 'get_music_generation_status' "
                 "until the music_url is available. "
-                "Always provide the final music URL to the user in a JSON format: {{'music_url': 'YOUR_URL', 'mood': 'INFERRED_MOOD'}}. "
-                "If an error occurs or music cannot be generated, provide an error message in JSON format: {{'error': 'YOUR_ERROR_MESSAGE'}}."
+                "Always provide the final music URL to the user in a JSON format: {{{{\"music_url\": \"YOUR_URL\", \"mood\": \"INFERRED_MOOD\"}}}}. "
+                "If an error occurs or music cannot be generated, provide an error message in JSON format: {{{{\"error\": \"YOUR_ERROR_MESSAGE\"}}}}."
             ),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}"),
@@ -299,7 +317,7 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
     
     try:
         # A single invocation triggers the entire agent-driven workflow.
-        response = await agent_executor_instance.invoke(
+        response = await agent_executor_instance.ainvoke(
             {"input": full_input, "chat_history": []}
         )
         print(f"Agent final output: {response.get('output')}")
