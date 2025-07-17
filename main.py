@@ -137,7 +137,9 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
     """
     Uses an LLM to extract temperature and conditions from a natural language query about weather.
     """
+    print(f"[DEBUG] _extract_weather_params_tool called with natural_language_query: {natural_language_query}")
     if weather_extractor_llm is None:
+        print("[ERROR] Weather extractor LLM not initialized.")
         raise HTTPException(status_code=500, detail="Weather extractor LLM not initialized.")
 
     weather_extraction_prompt = ChatPromptTemplate.from_messages(
@@ -150,25 +152,29 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
                 "If temperature or conditions are not explicitly mentioned but implied, try to infer reasonable defaults "
                 "or state 'unknown' if no reasonable inference can be made. "
                 "Your response must be ONLY a JSON object with 'temperature_celsius' (float) and 'conditions' (string) keys. "
-                "Example: {{\"temperature_celsius\": 22.5, \"conditions\": \"sunny with a light breeze\"}}"
+                "Example: {{{{\"temperature_celsius\": 22.5, \"conditions\": \"sunny with a light breeze\"}}}}"
             ),
             ("human", "{query}")
         ]
     )
 
+    print("[DEBUG] Created weather_extraction_prompt.")
     weather_extraction_chain = weather_extraction_prompt | weather_extractor_llm | JsonOutputParser()
+    print("[DEBUG] Created weather_extraction_chain.")
 
     try:
-        llm_response = await weather_extraction_chain.invoke({"query": natural_language_query})
+        print(f"[DEBUG] Invoking weather_extraction_chain with query: {natural_language_query}")
+        llm_response = await weather_extraction_chain.ainvoke({"query": natural_language_query})
+        print(f"[DEBUG] LLM response from weather_extraction_chain: {llm_response}")
         
         extracted_params = ExtractedWeatherParams(
             temperature_celsius=llm_response.get("temperature_celsius"),
             conditions=llm_response.get("conditions")
         )
-        print(f"Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
+        print(f"[DEBUG] Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
         return extracted_params
     except Exception as e:
-        print(f"Error during LLM weather parameter extraction: {e}")
+        print(f"[ERROR] Exception during LLM weather parameter extraction: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to extract weather parameters: {e}. Ensure LLM is configured and responds with valid JSON.")
 
 
@@ -244,14 +250,14 @@ async def startup_event():
                 "You are an AI assistant that orchestrates weather-to-mood-to-music. "
                 "Your primary goal is to provide a music URL based on user's weather inquiry. "
                 "You have access to the following tools:\n\n"
-                "{tools}\n\n"
+                "{{langchain_tools}}\n\n"
                 "First, use 'extract_weather_params' to get structured temperature and conditions from the user's natural language input. "
                 "Then, use 'analyze_weather_mood' with the extracted weather data to determine the mood. "
                 "Next, use 'initiate_music_generation' with the inferred mood and a suitable duration (e.g., 90 seconds) to start music creation. "
                 "If 'initiate_music_generation' returns a task_id, periodically check its status using 'get_music_generation_status' "
                 "until the music_url is available. "
-                "Always provide the final music URL to the user in a JSON format: {{'music_url': 'YOUR_URL', 'mood': 'INFERRED_MOOD'}}. "
-                "If an error occurs or music cannot be generated, provide an error message in JSON format: {{'error': 'YOUR_ERROR_MESSAGE'}}."
+                "Always provide the final music URL to the user in a JSON format: {{{{\"music_url\": \"YOUR_URL\", \"mood\": \"INFERRED_MOOD\"}}}}. "
+                "If an error occurs or music cannot be generated, provide an error message in JSON format: {{{{\"error\": \"YOUR_ERROR_MESSAGE\"}}}}."
             ),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", "{input}"),
@@ -299,7 +305,7 @@ async def weather_to_music_endpoint(request_data: NaturalLanguageWeatherMusicReq
     
     try:
         # A single invocation triggers the entire agent-driven workflow.
-        response = await agent_executor_instance.invoke(
+        response = await agent_executor_instance.ainvoke(
             {"input": full_input, "chat_history": []}
         )
         print(f"Agent final output: {response.get('output')}")
