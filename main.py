@@ -8,6 +8,7 @@ import requests
 import json
 import time
 import asyncio
+import logging
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -137,9 +138,10 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
     """
     Uses an LLM to extract temperature and conditions from a natural language query about weather.
     """
-    print(f"[DEBUG] _extract_weather_params_tool called with natural_language_query: {natural_language_query}")
+    logger = logging.getLogger("weather_orchestration")
+    logger.debug(f"_extract_weather_params_tool called with natural_language_query: {natural_language_query}")
     if weather_extractor_llm is None:
-        print("[ERROR] Weather extractor LLM not initialized.")
+        logger.error("Weather extractor LLM not initialized.")
         raise HTTPException(status_code=500, detail="Weather extractor LLM not initialized.")
 
     weather_extraction_prompt = ChatPromptTemplate.from_messages(
@@ -158,23 +160,26 @@ async def _extract_weather_params_tool(natural_language_query: str) -> Extracted
         ]
     )
 
-    print("[DEBUG] Created weather_extraction_prompt.")
+    logger.debug("Created weather_extraction_prompt.")
     weather_extraction_chain = weather_extraction_prompt | weather_extractor_llm | JsonOutputParser()
-    print("[DEBUG] Created weather_extraction_chain.")
+    logger.debug("Created weather_extraction_chain.")
 
     try:
-        print(f"[DEBUG] Invoking weather_extraction_chain with query: {natural_language_query}")
+        logger.debug(f"Invoking weather_extraction_chain with query: {natural_language_query}")
+        # Show the prompt that will be sent to the LLM
+        prompt_dict = weather_extraction_prompt.format(query=natural_language_query)
+        logger.debug(f"LLM API call payload: {prompt_dict}")
         llm_response = await weather_extraction_chain.ainvoke({"query": natural_language_query})
-        print(f"[DEBUG] LLM response from weather_extraction_chain: {llm_response}")
+        logger.debug(f"LLM response from weather_extraction_chain: {llm_response}")
         
         extracted_params = ExtractedWeatherParams(
             temperature_celsius=llm_response.get("temperature_celsius"),
             conditions=llm_response.get("conditions")
         )
-        print(f"[DEBUG] Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
+        logger.debug(f"Extracted weather params for '{natural_language_query}': {extracted_params.model_dump_json()}")
         return extracted_params
     except Exception as e:
-        print(f"[ERROR] Exception during LLM weather parameter extraction: {e}")
+        logger.error(f"Exception during LLM weather parameter extraction: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to extract weather parameters: {e}. Ensure LLM is configured and responds with valid JSON.")
 
 
